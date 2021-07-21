@@ -2,20 +2,22 @@ use std::env;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
+use reqwest::blocking::get;
 
-fn main() -> std::io::Result<()> {
-    let infile = std::fs::File::open("champion.json").unwrap();
-    let json: serde_json::Value = serde_json::from_reader(infile).unwrap();
-    let champions = json["data"].as_object().unwrap();
+fn main() -> anyhow::Result<()> {
+    let infile = get("https://raw.communitydragon.org/latest/plugins/rcp-be-lol-game-data/global/default/v1/champion-summary.json")?;
+    let champions: Vec<serde_json::Value> = serde_json::from_reader(infile)?;
 
     let mut map = phf_codegen::Map::<u64>::new();
 
-    for (_, champ) in champions {
-        //println!("{:?}", champ["name"].as_str().unwrap());
-        map.entry(
-            champ["key"].as_str().unwrap().parse().unwrap(),
-            &format!("{:?}", champ["name"].as_str().unwrap()),
-        );
+    for champ in champions {
+        let key = champ["id"].as_i64().unwrap();
+        if key < 0 {
+            continue;
+        }
+        let key = key as u64;
+        let value = &format!("{:?}", champ["name"].as_str().unwrap());
+        map.entry(key, value);
     }
     let outfile = Path::new(&env::var("OUT_DIR").unwrap()).join("champions.rs");
     let mut outfile = BufWriter::new(File::create(&outfile).unwrap());

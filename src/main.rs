@@ -2,14 +2,13 @@ use anyhow::{anyhow, Context, Result};
 use cached::proc_macro::cached;
 use lcu::{LCUClient, LCUWebSocket};
 use rusqlite::NO_PARAMS;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, Row};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
-use std::io::Write;
 use std::str;
 use std::sync::mpsc::channel;
 use std::thread;
-use std::time;
+use std::time::{self, Duration};
 
 mod lcu;
 
@@ -148,6 +147,7 @@ struct SelectSession {
 struct SessionPlayer {
     cell_id: u64,
     champion_id: u64,
+    champion_pick_intent: u64,
     spell1_id: u64,
     spell2_id: u64,
     summoner_id: u64,
@@ -169,34 +169,77 @@ enum GamePhase {
 fn setup_sqlite() -> Result<Connection> {
     let conn = Connection::open("rune_pages.db").context("failed to open DB file")?;
 
+    let create = conn.execute(
+        "create table rune_pages (
+                champ_id integer not null,
+                game_mode text not null,
+                spell1_id integer not null,
+                spell2_id integer not null,
+                page text not null,
+                primary key (champ_id, game_mode) on conflict replace
+            )",
+        NO_PARAMS,
+    );
+    // If create worked, we're done
+    if create.is_ok() {
+        return Ok(conn);
+    }
+    // If create didn't work, we can have either v1 or v2. Try to add a v2 column.
+    let alter = conn.execute(
+        "alter table rune_pages add column spell1_id integer",
+        NO_PARAMS,
+    );
+    // If add column failed, we're on v2, so we're done.
+    if alter.is_err() {
+        return Ok(conn);
+    }
+    // Add column succeeded, so convert v1 to v2
+    // see https://www.sqlite.org/lang_altertable.html for specifics on order of operations.
+    println!("upgrading database");
     conn.execute(
-        "create table if not exists rune_pages (
+        "create table rune_pages_new (
             champ_id integer not null,
             game_mode text not null,
-            player text not null,
+            spell1_id integer not null,
+            spell2_id integer not null,
             page text not null,
             primary key (champ_id, game_mode) on conflict replace
         )",
         NO_PARAMS,
     )?;
+
+    conn.execute(
+        "insert into rune_pages_new (champ_id, game_mode, spell1_id, spell2_id, page)
+            select champ_id
+            , game_mode
+            , json_extract(player, '$.spell1Id')
+            , json_extract(player, '$.spell2Id')
+            , page
+            from rune_pages",
+        NO_PARAMS,
+    )?;
+    conn.execute("drop table rune_pages", NO_PARAMS)?;
+    conn.execute("alter table rune_pages_new rename to rune_pages", NO_PARAMS)?;
+    println!("upgraded database");
     Ok(conn)
 }
 
 fn save_rune_page(
     conn: &Connection,
-    player: &SessionPlayer,
+    champ_id: u64,
+    spells: (u64, u64),
     game_mode: &str,
     rune_page: &RunePage,
 ) -> Result<()> {
-    let player_json = serde_json::to_string(&player)?;
     let rune_page_json = serde_json::to_string(&rune_page)?;
     conn.execute(
-        "INSERT INTO rune_pages (champ_id, game_mode, player, page)
-                  VALUES (?1, ?2, ?3, ?4)",
+        "INSERT INTO rune_pages (champ_id, game_mode, spell1_id, spell2_id, page)
+                  VALUES (?1, ?2, ?3, ?4, ?5)",
         params![
-            player.champion_id as i64,
+            champ_id as i64,
             game_mode,
-            player_json,
+            spells.0 as i64,
+            spells.1 as i64,
             rune_page_json
         ],
     )?;
@@ -220,42 +263,38 @@ struct MobaPerks {
     sub_style: String,
 }
 
+fn row_to_data(row: &Row, champ_id: u64) -> Result<Vec<(RunePage, (u64, u64))>> {
+    let spells: (i64, i64) = (row.get(0)?, row.get(1)?);
+    let spells: (u64, u64) = (spells.0 as u64, spells.1 as u64);
+    let page: String = row.get(2)?;
+    let mut page: RunePage = serde_json::from_str(&page)?;
+    println!("found spells & page: {:?} {:?}", spells, page);
+    page.name = format!("{} (saved) {}", CHAMPIONS[&champ_id].to_string(), MARKER);
+    Ok(vec![(page, spells)])
+}
+
 fn get_local_info(
     conn: &Connection,
     champ_id: u64,
     game_mode: &str,
 ) -> Result<Vec<(RunePage, (u64, u64))>> {
-    let mut result: Vec<(RunePage, (u64, u64))> = Vec::new();
-    let mut stmt =
-        conn.prepare("select player, page from rune_pages where champ_id = ?1 and game_mode = ?2")?;
+    let mut stmt = conn.prepare(
+        "select spell1_id, spell2_id, page from rune_pages where champ_id = ?1 and game_mode = ?2",
+    )?;
     let mut rows = stmt.query(params![champ_id as i64, game_mode])?;
-
     if let Some(row) = rows.next()? {
-        let player: String = row.get(0)?;
-        let player: SessionPlayer = serde_json::from_str(&player)?;
-        let page: String = row.get(1)?;
-        let mut page: RunePage = serde_json::from_str(&page)?;
-        println!("found player & page: {:?} {:?}", player, page);
-        page.name = format!("{} (saved) {}", CHAMPIONS[&champ_id].to_string(), MARKER);
-        result.push((page, (player.spell1_id, player.spell2_id)));
-        return Ok(result);
+        return row_to_data(row, champ_id);
     }
 
     println!("couldn't find anything for champ and mode, trying just champ");
-    let mut stmt = conn.prepare("select player, page from rune_pages where champ_id = ?1")?;
+    let mut stmt =
+        conn.prepare("select spell1_id, spell2_id, page from rune_pages where champ_id = ?1")?;
     let mut rows = stmt.query(params![champ_id as i64])?;
-
     if let Some(row) = rows.next()? {
-        let player: String = row.get(0)?;
-        let player: SessionPlayer = serde_json::from_str(&player)?;
-        let page: String = row.get(1)?;
-        let mut page: RunePage = serde_json::from_str(&page)?;
-        println!("{:?} {:?}", player, page);
-        page.name = format!("{} (saved) {}", CHAMPIONS[&champ_id].to_string(), MARKER);
-        result.push((page, (player.spell1_id, player.spell2_id)));
+        return row_to_data(row, champ_id);
     }
-
-    Ok(result)
+    // Just return an empty vec, so the next bit of code can add to it whether we found anything or not.
+    Ok(Vec::new())
 }
 
 #[cached(time = 64800, result = true)]
@@ -270,18 +309,28 @@ fn get_mobalytics_info(champ_id: u64) -> Result<Vec<(RunePage, (u64, u64))>> {
         })
         .collect();
 
+    if name == "nunuwillump" {
+        name.truncate(4);
+    }
+
     let url = format!(
         "https://api.mobalytics.gg/lol/champions/v1/meta?name={}",
         name
     );
     println!("fetching {}", url);
-    let json = reqwest::blocking::get(&url)?.text()?;
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(4))
+        .connect_timeout(Duration::from_secs(2))
+        .build()?;
+    let json = client.get(&url).send()?.text()?;
     let mut json: serde_json::Value = serde_json::from_str(&json)?;
-    let roles = json["data"]["roles"].as_array_mut().context("no roles")?;
     let mut all_builds = Vec::<MobaBuild>::new();
-    for role in roles {
-        let mut builds: Vec<MobaBuild> = serde_json::from_value(role["builds"].to_owned())?;
-        all_builds.append(&mut builds);
+    let roles = json["data"]["roles"].as_array_mut();
+    if let Some(roles) = roles {
+        for role in roles {
+            let mut builds: Vec<MobaBuild> = serde_json::from_value(role["builds"].to_owned())?;
+            all_builds.append(&mut builds);
+        }
     }
     // make sure the unwrap() with partial_cmp() doesn't fail
     for build in &mut all_builds {
@@ -297,7 +346,12 @@ fn get_mobalytics_info(champ_id: u64) -> Result<Vec<(RunePage, (u64, u64))>> {
                 name: format!("{} (mobalytics) {}", build.name, MARKER),
                 primary_style_id: build.perks.style.parse()?,
                 sub_style_id: build.perks.sub_style.parse()?,
-                selected_perk_ids: build.perks.ids.iter().filter_map(|s| s.parse().ok()).collect(),
+                selected_perk_ids: build
+                    .perks
+                    .ids
+                    .iter()
+                    .filter_map(|s| s.parse().ok())
+                    .collect(),
                 ..Default::default()
             };
             let spell1_id: u64 = build.spells[0].parse()?;
@@ -332,8 +386,9 @@ fn check_or_make_space(lcuclient: &LCUClient) -> Result<usize> {
         })
         .collect::<Result<Vec<RunePage>>>()?;
     let max_pages = lcuclient.get("/lol-perks/v1/inventory")?.text()?;
-    let max_pages =
-        serde_json::from_str::<serde_json::Value>(&max_pages)?["ownedPageCount"].as_u64().unwrap() as usize;
+    let max_pages = serde_json::from_str::<serde_json::Value>(&max_pages)?["ownedPageCount"]
+        .as_u64()
+        .unwrap() as usize;
     let available_space = max_pages - pages.len();
     if available_space == 0 {
         println!("at max pages, deleting oldest");
@@ -365,18 +420,56 @@ fn set_rune_page(lcuclient: &LCUClient, page: &RunePage) -> Result<()> {
 fn setup_runes_and_spells(
     lcuclient: &LCUClient,
     conn: &Connection,
-    player: &SessionPlayer,
+    champ_id: u64,
     game_mode: &str,
 ) -> Result<()> {
     let mut available_space = check_or_make_space(&lcuclient)?;
 
-    let mut runes_and_spells = get_local_info(&conn, player.champion_id, game_mode)?;
+    let mut runes_and_spells = get_local_info(&conn, champ_id, game_mode)?;
+    println!("after local, num pages: {}", runes_and_spells.len());
     println!("looking up on mobalytics");
-    runes_and_spells.append(&mut get_mobalytics_info(player.champion_id)?);
-    if runes_and_spells.len() > available_space {
+    if let Ok(mut mobalytics) = get_mobalytics_info(champ_id) {
+        runes_and_spells.append(&mut mobalytics);
+    }
+    println!("after mobalytics, num pages: {}", runes_and_spells.len());
+    for (runes, _) in &mut runes_and_spells {
+        runes.selected_perk_ids.sort();
+    }
+
+    // If runes and spells are the same, only keep one
+    let mut runes_and_spells: Vec<(RunePage, (u64, u64))> = runes_and_spells
+        .into_iter()
+        .fold(Vec::new(), |mut acc, (runes, spells)| {
+            if acc.iter().find(|&(previous_runes, previous_spells)| {
+                //println!("comparing \n{:?}\nwith\n{:?}\n", (&runes, spells), (previous_runes, previous_spells));
+                spells == *previous_spells
+                && runes.primary_style_id == previous_runes.primary_style_id
+                && runes.sub_style_id == previous_runes.sub_style_id
+                && runes.selected_perk_ids == previous_runes.selected_perk_ids
+            }).is_none() {
+                acc.push((runes, spells));
+            } else {
+                println!("found duplicate");
+            }
+            acc
+        });
+    println!("after deduplication, num pages: {}", runes_and_spells.len());
+
+    let len = runes_and_spells.len();
+    if len > available_space {
+        println!(
+            "Have {} pages, but there's only room for {}",
+            len, available_space
+        );
         runes_and_spells.drain(available_space..);
     }
+    println!("after size adjustment, num pages: {}", runes_and_spells.len());
+
+    println!("num pages: {}", runes_and_spells.len());
+
+    // Reverse so highest winrate is installed last (and thus is active at the end)
     runes_and_spells.reverse();
+
     for (index, (page, mut spells)) in runes_and_spells.into_iter().enumerate() {
         if available_space == 0 {
             break;
@@ -406,7 +499,8 @@ fn main() -> Result<()> {
 
     let conn = setup_sqlite()?;
 
-    let mut stmt = conn.prepare("select champ_id, game_mode, player, page from rune_pages")?;
+    let mut stmt =
+        conn.prepare("select champ_id, game_mode, spell1_id, spell2_id, page from rune_pages")?;
     let mut rows = stmt.query(NO_PARAMS)?;
 
     let mut num: usize = 0;
@@ -416,41 +510,30 @@ fn main() -> Result<()> {
 
     println!("stored pages: {}", num);
     loop {
-        run_event_loop(&conn)?;
+        let _ = run_event_loop(&conn);
     }
 }
 
 fn run_event_loop(conn: &Connection) -> Result<()> {
-    let mut prev_champ: u64;
     let mut game_mode: Option<String> = None;
     let mut rune_page: Option<RunePage> = None;
-    let mut player: Option<SessionPlayer> = None;
+    let mut champ_id: Option<u64> = None;
     let mut phase: Option<GamePhase> = None;
+    let mut spells: Option<(u64, u64)> = None;
 
     let lcuclient = LCUClient::new()?;
-    while clean_pages(&lcuclient).is_err() {
+    if clean_pages(&lcuclient).is_err() {
         println!("LCU not returning data, sleeping...");
         thread::sleep(time::Duration::from_secs(2));
+        return Ok(());
     }
 
-    let filename = format!(
-        "output{}.txt",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_secs()
-    );
-    println!("Writing to {}", filename);
-    let mut file = std::fs::File::create(filename)?;
-
-    let (sender, receiver) = channel();
-    let select_file_sender = sender.clone();
-
-    let (player_sender, player_receiver) = channel();
+    let (champ_sender, champ_receiver) = channel();
+    let (spells_sender, spells_receiver) = channel();
     let mut ws = LCUWebSocket::new();
     ws.subscribe(
         "OnJsonApiEvent_lol-champ-select_v1_session".to_string(),
         move |json| {
-            select_file_sender.send(serde_json::to_string_pretty(json)?)?;
             /* convert to string and back so we fully own the data, since ::from_value doesn't take
              * a reference. */
             let session = serde_json::to_string(&json["data"])?;
@@ -461,13 +544,24 @@ fn run_event_loop(conn: &Connection) -> Result<()> {
                     .my_team
                     .into_iter()
                     .find(|player| player.cell_id == local_player_cell_id);
-                player_sender.send(me)?;
+                if let Some(me) = me {
+                    let champ_id = if me.champion_id != 0 {
+                        me.champion_id
+                    } else {
+                        me.champion_pick_intent
+                    };
+                    if champ_id != 0 {
+                        champ_sender.send(champ_id)?;
+                    }
+                    if me.spell1_id != 0 && me.spell2_id != 0 {
+                        spells_sender.send((me.spell1_id, me.spell2_id))?
+                    }
+                }
             }
             Ok(())
         },
     );
 
-    let flow_file_sender = sender.clone();
     let (gm_sender, gm_receiver) = channel();
     let (phase_sender, phase_receiver) = channel();
     ws.subscribe(
@@ -496,7 +590,6 @@ fn run_event_loop(conn: &Connection) -> Result<()> {
                 None
             };
             phase_sender.send(phase)?;
-            flow_file_sender.send(serde_json::to_string_pretty(&json)?)?;
             Ok(())
         },
     );
@@ -514,7 +607,6 @@ fn run_event_loop(conn: &Connection) -> Result<()> {
             } else {
                 runes_sender.send(None)?;
             }
-            sender.send(format!("{}", serde_json::to_string_pretty(&json)?))?;
             Ok(())
         },
     );
@@ -529,10 +621,6 @@ fn run_event_loop(conn: &Connection) -> Result<()> {
     */
 
     while let Ok(()) = ws.dispatch() {
-        while let Ok(pretty) = receiver.try_recv() {
-            file.write_all(&pretty.as_bytes())?;
-        }
-
         while let Ok(new_gm) = gm_receiver.try_recv() {
             match game_mode {
                 None => {
@@ -559,35 +647,26 @@ fn run_event_loop(conn: &Connection) -> Result<()> {
             }
         }
 
-        while let Ok(p) = player_receiver.try_recv() {
-            let prev_player = player;
-            if let Some(player) = player {
-                prev_champ = player.champion_id;
-            } else {
-                prev_champ = 0;
+        while let Ok(cid) = champ_receiver.try_recv() {
+            let prev_champ_id = champ_id;
+            champ_id = Some(cid);
+            if prev_champ_id != champ_id {
+                println!("Champ ID: {:?}", cid);
+                if let Some(game_mode) = &game_mode {
+                    println!("setup runes");
+                    setup_runes_and_spells(&lcuclient, &conn, cid, &game_mode)?;
+                } else {
+                    println!("got champ_id, but no qid, using UNKNOWN");
+                    setup_runes_and_spells(&lcuclient, &conn, cid, &"UNKNOWN")?;
+                }
             }
-            player = p;
-            if prev_player != player {
-                match player {
-                    Some(player) if player.champion_id != 0 => {
-                        if prev_champ != player.champion_id {
-                            println!("Player: {:?}", player);
-                            if let Some(game_mode) = &game_mode {
-                                println!("setup runes");
-                                setup_runes_and_spells(&lcuclient, &conn, &player, &game_mode)?;
-                            } else {
-                                println!("got player, but no qid, using UNKNOWN");
-                                setup_runes_and_spells(&lcuclient, &conn, &player, &"UNKNOWN")?;
-                            }
-                        }
-                    }
-                    Some(_player) => {
-                        println!("champ_id == 0");
-                    }
-                    None => {
-                        println!("No player");
-                    }
-                };
+        }
+
+        while let Ok(sp) = spells_receiver.try_recv() {
+            let prev_spells = spells;
+            spells = Some(sp);
+            if prev_spells != spells {
+                println!("Spells: {} {}", sp.0, sp.1);
             }
         }
 
@@ -599,17 +678,22 @@ fn run_event_loop(conn: &Connection) -> Result<()> {
                     if p == GamePhase::GameStart {
                         let rune_page = lcuclient.get("/lol-perks/v1/currentpage")?.text()?;
                         let rune_page: RunePage = serde_json::from_str(&rune_page)?;
-                        if let (Some(player), Some(game_mode)) = (player, &game_mode) {
+                        if let (Some(champ_id), Some(spells), Some(game_mode)) =
+                            (champ_id, spells, &game_mode)
+                        {
                             println!("Saving rune page");
-                            save_rune_page(&conn, &player, &game_mode, &rune_page)?;
+                            save_rune_page(&conn, champ_id, spells, &game_mode, &rune_page)?;
                         } else {
-                            if player == None {
-                                println!("Missing player");
+                            if champ_id == None {
+                                println!("Missing champ_id");
+                            }
+                            if spells == None {
+                                println!("Missing spells");
                             }
                             if game_mode == None {
                                 println!("Missing game mode");
                             }
-                            println!("Missing player/game mode/runes at game start");
+                            println!("Missing champ_id/spells/game mode/runes at game start");
                         }
                     }
                     println!("Phase: {:?}", p);
@@ -660,6 +744,7 @@ fn clean_pages(lcuclient: &LCUClient) -> Result<()> {
         }
     }
 
+    // XXX: make sure there's an empty slot 
     if pages_to_delete.is_empty() {
         println!("deleting:");
         for page in pages_to_delete.into_iter() {
