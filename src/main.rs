@@ -268,7 +268,7 @@ fn row_to_data(row: &Row, champ_id: u64) -> Result<Vec<(RunePage, (u64, u64))>> 
     let page: String = row.get(2)?;
     let mut page: RunePage = serde_json::from_str(&page)?;
     println!("found spells & page: {:?} {:?}", spells, page);
-    page.name = format!("{} (saved) {}", CHAMPIONS[&champ_id].to_string(), MARKER);
+    page.name = format!("{} (saved) {}", CHAMPIONS[&champ_id], MARKER);
     Ok(vec![(page, spells)])
 }
 
@@ -302,10 +302,7 @@ fn get_mobalytics_info(champ_id: u64) -> Result<Vec<(RunePage, (u64, u64))>> {
     name.make_ascii_lowercase();
     name = name
         .chars()
-        .filter(|c| match c {
-            'a'..='z' => true,
-            _ => false,
-        })
+        .filter(|c| matches!(c, 'a'..='z'))
         .collect();
 
     if name == "nunuwillump" {
@@ -338,7 +335,7 @@ fn get_mobalytics_info(champ_id: u64) -> Result<Vec<(RunePage, (u64, u64))>> {
         }
     }
     all_builds.sort_unstable_by(|a, b| b.win_rate.partial_cmp(&a.win_rate).unwrap());
-    let all_builds = all_builds
+    all_builds
         .into_iter()
         .map(|build| {
             let page = RunePage {
@@ -357,8 +354,7 @@ fn get_mobalytics_info(champ_id: u64) -> Result<Vec<(RunePage, (u64, u64))>> {
             let spell2_id: u64 = build.spells[1].parse()?;
             Ok((page, (spell1_id, spell2_id)))
         })
-        .collect();
-    all_builds
+        .collect()
 }
 
 fn delete_page(lcuclient: &LCUClient, page: &RunePage) -> Result<()> {
@@ -369,13 +365,13 @@ fn delete_page(lcuclient: &LCUClient, page: &RunePage) -> Result<()> {
 fn check_or_make_space(lcuclient: &LCUClient) -> Result<usize> {
     let pages = lcuclient.get("/lol-perks/v1/pages")?.text()?;
     let pages: Vec<RunePage> = serde_json::from_str(&pages)?;
-    let pages: Vec<RunePage> = pages.into_iter().filter(|page| page.is_deletable).collect();
 
     let mut pages = pages
         .into_iter()
+        .filter(|page| page.is_deletable)
         .filter_map(|page| {
             if page.name.contains(MARKER) {
-                match delete_page(&lcuclient, &page) {
+                match delete_page(lcuclient, &page) {
                     Ok(_) => None,
                     Err(e) => Some(Err(e)),
                 }
@@ -392,7 +388,7 @@ fn check_or_make_space(lcuclient: &LCUClient) -> Result<usize> {
     if available_space == 0 {
         println!("at max pages, deleting oldest");
         pages.sort_unstable_by(|a, b| a.last_modified.cmp(&b.last_modified));
-        delete_page(&lcuclient, pages.first().context("No pages to delete?")?)?;
+        delete_page(lcuclient, pages.first().context("No pages to delete?")?)?;
         return Ok(1);
     }
     Ok(available_space)
@@ -422,9 +418,9 @@ fn setup_runes_and_spells(
     champ_id: u64,
     game_mode: &str,
 ) -> Result<()> {
-    let mut available_space = check_or_make_space(&lcuclient)?;
+    let mut available_space = check_or_make_space(lcuclient)?;
 
-    let mut runes_and_spells = get_local_info(&conn, champ_id, game_mode)?;
+    let mut runes_and_spells = get_local_info(conn, champ_id, game_mode)?;
     println!("after local, num pages: {}", runes_and_spells.len());
     println!("looking up on mobalytics");
     if let Ok(mut mobalytics) = get_mobalytics_info(champ_id) {
@@ -439,13 +435,13 @@ fn setup_runes_and_spells(
     let mut runes_and_spells: Vec<(RunePage, (u64, u64))> = runes_and_spells
         .into_iter()
         .fold(Vec::new(), |mut acc, (runes, spells)| {
-            if acc.iter().find(|&(previous_runes, previous_spells)| {
+            if !acc.iter().any(|(previous_runes, previous_spells)| {
                 //println!("comparing \n{:?}\nwith\n{:?}\n", (&runes, spells), (previous_runes, previous_spells));
                 spells == *previous_spells
                 && runes.primary_style_id == previous_runes.primary_style_id
                 && runes.sub_style_id == previous_runes.sub_style_id
                 && runes.selected_perk_ids == previous_runes.selected_perk_ids
-            }).is_none() {
+            }) {
                 acc.push((runes, spells));
             } else {
                 println!("found duplicate");
@@ -653,10 +649,10 @@ fn run_event_loop(conn: &Connection) -> Result<()> {
                 println!("Champ ID: {:?}", cid);
                 if let Some(game_mode) = &game_mode {
                     println!("setup runes");
-                    setup_runes_and_spells(&lcuclient, &conn, cid, &game_mode)?;
+                    setup_runes_and_spells(&lcuclient, conn, cid, game_mode)?;
                 } else {
                     println!("got champ_id, but no qid, using UNKNOWN");
-                    setup_runes_and_spells(&lcuclient, &conn, cid, &"UNKNOWN")?;
+                    setup_runes_and_spells(&lcuclient, conn, cid, "UNKNOWN")?;
                 }
             }
         }
@@ -681,7 +677,7 @@ fn run_event_loop(conn: &Connection) -> Result<()> {
                             (champ_id, spells, &game_mode)
                         {
                             println!("Saving rune page");
-                            save_rune_page(&conn, champ_id, spells, &game_mode, &rune_page)?;
+                            save_rune_page(conn, champ_id, spells, game_mode, &rune_page)?;
                         } else {
                             if champ_id == None {
                                 println!("Missing champ_id");
@@ -751,7 +747,7 @@ fn clean_pages(lcuclient: &LCUClient) -> Result<()> {
                 "  {} [id:{}] [lm:{}]",
                 page.name, page.id, page.last_modified
             );
-            delete_page(&lcuclient, &page)?;
+            delete_page(lcuclient, &page)?;
         }
     } else {
         println!("nothing to clean");
