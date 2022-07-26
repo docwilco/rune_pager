@@ -1,7 +1,6 @@
 use anyhow::{anyhow, Context, Result};
 use cached::proc_macro::cached;
 use lcu::{LCUClient, LCUWebSocket};
-use rusqlite::NO_PARAMS;
 use rusqlite::{params, Connection, Row};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
@@ -178,7 +177,7 @@ fn setup_sqlite() -> Result<Connection> {
                 page text not null,
                 primary key (champ_id, game_mode) on conflict replace
             )",
-        NO_PARAMS,
+        [],
     );
     // If create worked, we're done
     if create.is_ok() {
@@ -187,7 +186,7 @@ fn setup_sqlite() -> Result<Connection> {
     // If create didn't work, we can have either v1 or v2. Try to add a v2 column.
     let alter = conn.execute(
         "alter table rune_pages add column spell1_id integer",
-        NO_PARAMS,
+        [],
     );
     // If add column failed, we're on v2, so we're done.
     if alter.is_err() {
@@ -205,7 +204,7 @@ fn setup_sqlite() -> Result<Connection> {
             page text not null,
             primary key (champ_id, game_mode) on conflict replace
         )",
-        NO_PARAMS,
+        [],
     )?;
 
     conn.execute(
@@ -216,10 +215,10 @@ fn setup_sqlite() -> Result<Connection> {
             , json_extract(player, '$.spell2Id')
             , page
             from rune_pages",
-        NO_PARAMS,
+        [],
     )?;
-    conn.execute("drop table rune_pages", NO_PARAMS)?;
-    conn.execute("alter table rune_pages_new rename to rune_pages", NO_PARAMS)?;
+    conn.execute("drop table rune_pages", [])?;
+    conn.execute("alter table rune_pages_new rename to rune_pages", [])?;
     println!("upgraded database");
     Ok(conn)
 }
@@ -501,7 +500,7 @@ fn main() -> Result<()> {
 
     let mut stmt =
         conn.prepare("select champ_id, game_mode, spell1_id, spell2_id, page from rune_pages")?;
-    let mut rows = stmt.query(NO_PARAMS)?;
+    let mut rows = stmt.query([])?;
 
     let mut num: usize = 0;
     while rows.next()?.is_some() {

@@ -1,6 +1,7 @@
 use std::cmp::min;
 use native_tls::TlsConnector;
 use regex::Regex;
+use tungstenite::client::IntoClientRequest;
 use std::collections::HashMap;
 use std::net::TcpStream;
 use std::process::Command;
@@ -141,7 +142,7 @@ struct Subscriber {
 pub struct LCUWebSocket {
     next_id: u64,
     subscribers: HashMap<String, Vec<Subscriber>>,
-    ws: websocket::client::sync::Client<native_tls::TlsStream<TcpStream>>,
+    ws: tungstenite::protocol::WebSocket<native_tls::TlsStream<TcpStream>>,
 }
 
 impl LCUWebSocket {
@@ -169,30 +170,23 @@ impl LCUWebSocket {
 
         println!("got connection!");
 
+        let mut request = "wss://127.0.0.1".into_client_request().unwrap();
+        request.headers_mut().insert(tungstenite::http::header::USER_AGENT, "LCU crate by DocWilco".parse().unwrap());
         let b64 = base64::encode(format!("riot:{}", token));
-        let mut headers = websocket::header::Headers::new();
-        headers.set(websocket::header::UserAgent(
-            "LCU crate by DocWilco".to_owned(),
-        ));
-        headers.set(websocket::header::Authorization(format!("Basic {}", b64)));
-
-        let ws = websocket::ClientBuilder::new("wss://127.0.0.1")
-            .unwrap()
-            .custom_headers(&headers)
-            .connect_on(stream)
-            .unwrap();
+        request.headers_mut().insert(tungstenite::http::header::AUTHORIZATION, format!("Basic {}", b64).parse().unwrap());
+        let (ws, _) = tungstenite::client(request, stream).unwrap();
         LCUWebSocket{ws, subscribers: HashMap::new(), next_id: 0}
     }
 
     pub fn subscribe<C>(&mut self, event: String, callback: C) -> u64 
         where C: FnMut(&serde_json::Value) -> Result<()> + 'static {
         let message =
-            websocket::message::Message::text(format!("[5, \"{}\"]", event));
+            tungstenite::protocol::Message::text(format!("[5, \"{}\"]", event));
         let id = self.next_id;
         let newsub = Subscriber{id, callback: Box::new(callback)};
         self.next_id += 1;
         self.subscribers.entry(event).or_default().push(newsub);
-        self.ws.send_message(&message).unwrap();
+        self.ws.write_message(message).unwrap();
         id
     }
 
@@ -209,8 +203,8 @@ impl LCUWebSocket {
 
     pub fn dispatch(&mut self) -> Result<(), String> {
         //println!("dispatch");
-        let message = self.ws.recv_message();
-        if let Ok(websocket::OwnedMessage::Text(message)) = message {
+        let message = self.ws.read_message();
+        if let Ok(tungstenite::protocol::Message::Text(message)) = message {
             if message.is_empty() {
                 println!("empty message");
                 return Ok(());
