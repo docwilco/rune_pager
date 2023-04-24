@@ -914,6 +914,7 @@ dependencies = [
  "anyhow",
  "base64",
  "cached",
+ "http",
  "lazy_static",
  "native-tls",
  "phf",

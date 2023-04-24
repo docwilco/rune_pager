@@ -1,11 +1,15 @@
 use std::cmp::min;
-use native_tls::TlsConnector;
+use std::thread::sleep;
+use std::time::Duration;
+use http::HeaderMap;
+use native_tls::{TlsConnector, TlsStream, Certificate};
 use regex::Regex;
+use tungstenite::WebSocket;
 use tungstenite::client::IntoClientRequest;
+use http::header::{AUTHORIZATION, CONTENT_TYPE, USER_AGENT};
 use std::collections::HashMap;
 use std::net::TcpStream;
 use std::process::Command;
-use std::{thread, time};
 use std::str;
 use anyhow::Result;
 
@@ -77,17 +81,17 @@ fn build_lcu_client(port: u16, token: String) -> Result<LCUClient> {
     let cert = reqwest::Certificate::from_pem(LCUCERT).unwrap();
 
     let b64 = base64::encode(format!("riot:{}", token));
-    let mut headers = reqwest::header::HeaderMap::new();
+    let mut headers = HeaderMap::new();
     headers.insert(
-        reqwest::header::USER_AGENT,
+        USER_AGENT,
         "LCU crate by DocWilco".parse().unwrap(),
     );
     headers.insert(
-        reqwest::header::AUTHORIZATION,
+        AUTHORIZATION,
         format!("Basic {}", b64).parse().unwrap(),
     );
     headers.insert(
-        reqwest::header::CONTENT_TYPE,
+        CONTENT_TYPE,
         "application/json".parse().unwrap(),
     );
     println!("{} {:?}", port, token);
@@ -103,8 +107,8 @@ impl LCUClient {
         let mut result = get_lcu_info();
         while result.is_err() {
             println!("LCU not found, sleeping...");
-            let ten_sec = time::Duration::from_secs(10);
-            thread::sleep(ten_sec);
+            let ten_sec = Duration::from_secs(10);
+            sleep(ten_sec);
             result = get_lcu_info();
         }
         let (port, token) = result.unwrap();
@@ -142,7 +146,7 @@ struct Subscriber {
 pub struct LCUWebSocket {
     next_id: u64,
     subscribers: HashMap<String, Vec<Subscriber>>,
-    ws: tungstenite::protocol::WebSocket<native_tls::TlsStream<TcpStream>>,
+    ws: WebSocket<TlsStream<TcpStream>>,
 }
 
 impl LCUWebSocket {
@@ -151,13 +155,13 @@ impl LCUWebSocket {
         let mut result = get_lcu_info();
         while result.is_err() {
             println!("LCU not found, sleeping...");
-            let ten_sec = time::Duration::from_secs(10);
-            thread::sleep(ten_sec);
+            let ten_sec = Duration::from_secs(10);
+            sleep(ten_sec);
             result = get_lcu_info();
         }
         let (port, token) = result.unwrap();
 
-        let cert = native_tls::Certificate::from_pem(LCUCERT).unwrap();
+        let cert = Certificate::from_pem(LCUCERT).unwrap();
 
         let connector = TlsConnector::builder()
             .add_root_certificate(cert)
@@ -171,9 +175,9 @@ impl LCUWebSocket {
         println!("got connection!");
 
         let mut request = "wss://127.0.0.1".into_client_request().unwrap();
-        request.headers_mut().insert(tungstenite::http::header::USER_AGENT, "LCU crate by DocWilco".parse().unwrap());
+        request.headers_mut().insert(USER_AGENT, "LCU crate by DocWilco".parse().unwrap());
         let b64 = base64::encode(format!("riot:{}", token));
-        request.headers_mut().insert(tungstenite::http::header::AUTHORIZATION, format!("Basic {}", b64).parse().unwrap());
+        request.headers_mut().insert(AUTHORIZATION, format!("Basic {}", b64).parse().unwrap());
         let (ws, _) = tungstenite::client(request, stream).unwrap();
         LCUWebSocket{ws, subscribers: HashMap::new(), next_id: 0}
     }

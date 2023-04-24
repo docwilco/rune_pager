@@ -26,3 +26,4 @@ rusqlite = { version = "0.28", features = ["bundled"] }
 lazy_static = "1.4"
 cached = "0.37"
 anyhow = "1.0"
+http = "0.2"
