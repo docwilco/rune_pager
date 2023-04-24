@@ -1,29 +1,29 @@
 [package]
 name = "rune_pager"
-version = "0.1.1"
+version = "0.2.0"
 authors = ["drwilco"]
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [build-dependencies]
-serde_json = "1.0"
-serde = { version = "1.0", features = ["derive"] }
-phf_codegen = "0.11"
-reqwest = { version = "0.11", features = ["blocking"] }
-anyhow = "1.0"
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+phf_codegen = "0"
+reqwest = { version = "0", features = ["blocking"] }
+anyhow = "1"
 
 [dependencies]
-reqwest = { version = "0.11", features = ["blocking"] }
-regex = "1.6"
-base64 = "0.13"
-serde_json = "1.0"
-serde = { version = "1.0", features = ["derive"] }
-phf = { version = "0.11", features = ["macros"] }
-tungstenite = { version = "0.17", features = ["native-tls"] }
-native-tls = "0.2"
-rusqlite = { version = "0.28", features = ["bundled"] }
-lazy_static = "1.4"
-cached = "0.37"
-anyhow = "1.0"
-http = "0.2"
+reqwest = { version = "0", features = ["blocking"] }
+regex = "1"
+base64 = "0"
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+phf = { version = "0", features = ["macros"] }
+tungstenite = { version = "0", features = ["native-tls"] }
+native-tls = "0"
+rusqlite = { version = "0", features = ["bundled"] }
+lazy_static = "1"
+cached = "0"
+anyhow = "1"
+http = "0"
