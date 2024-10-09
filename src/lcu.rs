@@ -1,6 +1,7 @@
 use std::cmp::min;
 use std::thread::sleep;
 use std::time::Duration;
+use base64::prelude::*;
 use http::HeaderMap;
 use native_tls::{TlsConnector, TlsStream, Certificate};
 use regex::Regex;
@@ -80,7 +81,7 @@ pub struct LCUClient {
 fn build_lcu_client(port: u16, token: String) -> Result<LCUClient> {
     let cert = reqwest::Certificate::from_pem(LCUCERT).unwrap();
 
-    let b64 = base64::encode(format!("riot:{}", token));
+    let b64 = BASE64_STANDARD.encode(format!("riot:{}", token));
     let mut headers = HeaderMap::new();
     headers.insert(
         USER_AGENT,
@@ -176,7 +177,7 @@ impl LCUWebSocket {
 
         let mut request = "wss://127.0.0.1".into_client_request().unwrap();
         request.headers_mut().insert(USER_AGENT, "LCU crate by DocWilco".parse().unwrap());
-        let b64 = base64::encode(format!("riot:{}", token));
+        let b64 = BASE64_STANDARD.encode(format!("riot:{}", token));
         request.headers_mut().insert(AUTHORIZATION, format!("Basic {}", b64).parse().unwrap());
         let (ws, _) = tungstenite::client(request, stream).unwrap();
         LCUWebSocket{ws, subscribers: HashMap::new(), next_id: 0}
@@ -190,7 +191,7 @@ impl LCUWebSocket {
         let newsub = Subscriber{id, callback: Box::new(callback)};
         self.next_id += 1;
         self.subscribers.entry(event).or_default().push(newsub);
-        self.ws.write_message(message).unwrap();
+        self.ws.send(message).unwrap();
         id
     }
 
@@ -207,7 +208,7 @@ impl LCUWebSocket {
 
     pub fn dispatch(&mut self) -> Result<(), String> {
         //println!("dispatch");
-        let message = self.ws.read_message();
+        let message = self.ws.read();
         if let Ok(tungstenite::protocol::Message::Text(message)) = message {
             if message.is_empty() {
                 println!("empty message");
